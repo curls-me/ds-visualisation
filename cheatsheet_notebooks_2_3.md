@@ -493,3 +493,121 @@ df_sqlalchemy.to_csv(
 - Both can hand results straight to `pd.read_sql(query, conn_or_engine)` — no manual row-by-row parsing needed.
 - Credentials always live in a git-ignored `.env` file, read at runtime with `os.getenv()` — never typed directly into a notebook.
 - Export once to CSV so downstream notebooks load instantly, don't need live DB credentials, and stay reproducible (the exact dataset is frozen on disk).
+
+---
+
+## Part 3 — Applied Example: Exercise Solution (`solutions/4_Visualization_exercise.ipynb`)
+
+This is the worked solution that puts notebooks 2 and 3 into practice on the real Kaggle survey dataset. It shows the pattern you'll reuse most often: **clean → aggregate → plot with a finding-style title.**
+
+**Data cleaning: turning a text salary range into a number**
+
+```python
+compensation = df[["latest_job_role", "yearly_earnings"]].copy()  # keep only the columns needed, .copy() avoids a pandas warning
+compensation = compensation.dropna()                              # drop rows with no salary answer
+
+def get_first_number(x):
+    """Extract the lower bound from a salary range string."""
+    x = x.split("-")[0]                                    # keep only the text before the '-', e.g. "$10,000-$14,999" -> "$10,000"
+    x = x.replace(",", "").replace(">", "").replace("$", "").strip()  # strip everything that isn't a digit
+    return int(x)                                           # convert the cleaned string to an integer
+
+compensation["salary_usd"] = compensation["yearly_earnings"].apply(get_first_number)
+                                                             # apply() runs the function once per row, building a new numeric column
+
+roles_of_interest = ["Data Scientist", "Data Analyst", "Data Engineer"]  # the three roles the stakeholder asked about
+data_compensation = compensation[
+    compensation["latest_job_role"].isin(roles_of_interest)  # keep only rows whose role is in that list
+]
+```
+
+**Explanatory box plot (answers "compare compensation across roles")**
+
+```python
+plt.figure(figsize=(9, 6))            # shorthand for fig, ax when you don't need the ax object afterwards
+sns.boxplot(
+    data=data_compensation, x="latest_job_role", y="salary_usd",
+    hue="latest_job_role",   # colour each box by role
+    palette="Set2",
+    legend=False,            # hide the legend: it would just repeat the x-axis labels
+)
+plt.title("Yearly Earnings Distribution: Data Scientists, Analysts, and Engineers")  # states what the chart shows, not just the variable names
+```
+
+**Two related bar charts from one `value_counts()` call**
+
+```python
+top_10_countries = df["county_residence"].value_counts().head(10).index.tolist()
+                        # count respondents per country, sort descending, keep the top 10 country names as a list
+df_top10 = df[df["county_residence"].isin(top_10_countries)].copy()  # filter the full dataset down to just those countries
+
+counts_2a = (
+    df_top10.groupby(["county_residence", "gender"]).size().reset_index(name="count")
+)                       # one row per country+gender combination, with a count column
+
+fig = px.bar(
+    counts_2a, x="county_residence", y="count", color="gender",
+    barmode="stack",                                  # stack genders within each country bar (shows the country total)
+    category_orders={"county_residence": top_10_countries},  # keep countries in "most respondents first" order, not alphabetical
+)
+fig.update_layout(xaxis_tickangle=-30)  # tilt long country names so they don't overlap
+
+women = df[df["gender"] == "Woman"]                              # filter to one gender
+top_women = women["county_residence"].value_counts().head(10).reset_index()  # count by country, keep top 10
+top_women.columns = ["country", "count"]                         # value_counts()'s default column names aren't descriptive, so rename them
+
+fig = px.bar(
+    top_women, x="count", y="country",
+    orientation="h",                       # horizontal: keeps long country names readable on the y-axis
+    color="count",                          # colour intensity doubles as a second encoding of the same value
+    color_continuous_scale="Blues",
+)
+fig.update_layout(yaxis={"categoryorder": "total ascending"})  # sort bars by value instead of default alphabetical/insertion order
+```
+
+**Grouped comparison across categories**
+
+```python
+no_python = df[df["programming_language_recommended"] != "Python"].copy()  # exclude the known top answer to see what's #2
+lang_counts = no_python["programming_language_recommended"].value_counts().reset_index()
+lang_counts.columns = ["language", "count"]
+
+role_lang = (
+    df_roles.groupby(["latest_job_role", "programming_language_recommended"])
+    .size()
+    .reset_index(name="count")
+)                       # one row per role+language combination
+
+fig = px.bar(
+    role_lang, x="programming_language_recommended", y="count",
+    color="latest_job_role",
+    barmode="group",     # 'group' puts roles side by side per language, so you can compare them directly (vs. 'stack' for totals)
+)
+```
+
+**Quick exploratory chart (Matplotlib, testing a one-line hypothesis)**
+
+```python
+education_counts = df["highest_education"].value_counts().sort_values()  # counts per level, ascending so the largest bar is at the top of a barh
+
+fig, ax = plt.subplots(figsize=(10, 5))
+ax.barh(education_counts.index, education_counts.values, color="#5B9BD5", edgecolor="white")  # barh = horizontal bar chart
+ax.spines[["top", "right"]].set_visible(False)  # remove two of the four box borders for a cleaner look
+```
+
+**Takeaway pattern:** every plot in this exercise follows the same shape — `value_counts()`/`groupby()` to aggregate → filter to the top N or the categories that matter → one plot call → a title that states the finding, not just the variable names.
+
+---
+
+## Guidelines for LLMs Writing Visualization Code
+
+If you (an LLM/AI assistant) are asked to generate plotting or data-prep code based on this cheatsheet, follow these to keep the output as simple as possible:
+
+1. **Pick the simplest chart that answers the question.** A bar chart or box plot beats a custom multi-trace figure unless the stakeholder question genuinely needs more (e.g. interactivity, geography, animation — see the decision guide in Part 1.5).
+2. **Use library defaults first.** Only add custom colours, annotations, or styling when they serve the specific point being made (e.g. highlighting one bar, as in the body-mass example) — not by default on every chart.
+3. **One aggregation, one plot.** Prefer `value_counts()` / `groupby().size()` / `.mean()` directly in the plotting cell over building intermediate DataFrames or classes you don't reuse elsewhere.
+4. **Only write a helper function if the transform repeats.** `get_first_number()` earns its place because it's applied per-row via `.apply()`; don't wrap a one-off `groupby` in a function "for readability."
+5. **Titles state the finding, not the variable names.** Weak: `"Salary by Job Role"`. Strong: `"Data Engineers Tend to Earn More Than Data Analysts"`. Only relax this for quick exploratory charts, which don't need to be presentation-ready.
+6. **Don't add error handling or validation for data shapes that can't occur** in a one-off notebook analysis (e.g. don't defensively check that a column exists before using it) — that belongs in production pipelines, not exploratory/explanatory notebooks.
+7. **Match the library to the actual need**, per the decision guide: Matplotlib for full control/publication, Seaborn for automatic statistics, Plotly only when interactivity, maps, or animation add real value — not as a default choice.
+8. **Comment the *why*, not the *what*.** Good: `# barmode='group' so roles are directly comparable, not stacked totals`. Skip comments that just restate the function name.
